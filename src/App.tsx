@@ -35,8 +35,8 @@ export default function App() {
       interval = window.setInterval(async () => {
         try {
           const res = await axios.get(`/api/status/${jobId}`);
-          if (res.status === 200) {
-            const data: JobStatus = res.data;
+          if (res.data?.success) {
+            const data: JobStatus = res.data.data;
             setJobStatus(data);
             if (data.status !== 'processing' && data.status !== 'queued') {
               clearInterval(interval);
@@ -63,7 +63,8 @@ export default function App() {
     formData.append('video', selectedFile);
 
     try {
-      const res = await axios.post<UploadResponse>('/api/upload', formData, {
+      // @ts-ignore
+      const res = await axios.post<{success: boolean, data: UploadResponse}>('/api/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         },
@@ -75,7 +76,7 @@ export default function App() {
         }
       });
 
-      const data = res.data;
+      const data = res.data.data;
       setJobId(data.jobId);
       setJobStatus({ status: 'idle', progress: 0, originalMetadata: data.metadata });
     } catch (err: any) {
@@ -96,7 +97,7 @@ export default function App() {
     try {
       const res = await axios.post('/api/process', { jobId, platform, qualityMode });
 
-      if (res.status !== 200) {
+      if (!res.data?.success) {
         throw new Error(res.data?.error || t('error_title'));
       }
       

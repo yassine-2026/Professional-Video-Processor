@@ -176,7 +176,7 @@ const calculateQualityScore = (metadata: VideoMetadata, profile: any) => {
 app.post('/api/upload', uploadLimiter, upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
-      res.status(400).json({ error: 'No video file provided' });
+      res.status(400).json({ success: false, error: 'No video file provided' });
       return;
     }
 
@@ -193,11 +193,11 @@ app.post('/api/upload', uploadLimiter, upload.single('video'), async (req, res) 
       createdAt: Date.now()
     });
 
-    res.json({ jobId, metadata });
+    res.json({ success: true, data: { jobId, metadata } });
   } catch (err: any) {
     console.error(err);
     if (req.file) fs.unlink(req.file.path, () => {});
-    res.status(500).json({ error: 'Failed to analyze video: ' + err.message });
+    res.status(500).json({ success: false, error: 'Failed to analyze video: ' + err.message });
   }
 });
 
@@ -206,13 +206,13 @@ app.post('/api/process', async (req, res) => {
     const { jobId, platform, qualityMode = 'maximum' } = req.body;
     
     if (!jobId || !platform || !PLATFORM_PROFILES[platform]) {
-      res.status(400).json({ error: 'Invalid parameters' });
+      res.status(400).json({ success: false, error: 'Invalid parameters' });
       return;
     }
 
     const job = jobs.get(jobId);
     if (!job || !job.inputPath) {
-      res.status(404).json({ error: 'Job or file not found' });
+      res.status(404).json({ success: false, error: 'Job or file not found' });
       return;
     }
 
@@ -223,13 +223,13 @@ app.post('/api/process', async (req, res) => {
     // Add to queue instead of processing directly
     jobQueue.push(jobId);
     
-    res.json({ jobId, message: 'Job added to queue' });
+    res.json({ success: true, data: { jobId, message: 'Job added to queue' } });
     
     processNextJob();
 
   } catch (err: any) {
     console.error(err);
-    res.status(500).json({ error: 'Internal server error: ' + err.message });
+    res.status(500).json({ success: false, error: 'Internal server error: ' + err.message });
   }
 });
 
@@ -333,29 +333,32 @@ const processNextJob = () => {
 
 app.get('/api/stats', (req, res) => {
   res.json({
-    activeJobs,
-    queuedJobs: jobQueue.length,
-    maxConcurrentJobs: MAX_CONCURRENT_JOBS,
-    totalTrackedJobs: jobs.size
+    success: true,
+    data: {
+      activeJobs,
+      queuedJobs: jobQueue.length,
+      maxConcurrentJobs: MAX_CONCURRENT_JOBS,
+      totalTrackedJobs: jobs.size
+    }
   });
 });
 
 app.get('/api/status/:jobId', (req, res) => {
   const jobId = req.params.jobId;
   if (!jobs.has(jobId)) {
-    res.status(404).json({ error: 'Job not found' });
+    res.status(404).json({ success: false, error: 'Job not found' });
     return;
   }
   // Exclude internal paths before sending to client
   const { inputPath, outputPath, ...publicJobData } = jobs.get(jobId)!;
-  res.json(publicJobData);
+  res.json({ success: true, data: publicJobData });
 });
 
 app.get('/api/download/:jobId', (req, res) => {
   const jobId = req.params.jobId;
   const job = jobs.get(jobId);
   if (!job || job.status !== 'completed' || !job.outputPath) {
-    res.status(404).json({ error: 'File not ready or job not found' });
+    res.status(404).json({ success: false, error: 'File not ready or job not found' });
     return;
   }
   
@@ -373,7 +376,7 @@ app.get('/api/download/:jobId', (req, res) => {
       }, 60000 * 5); // Delete 5 mins after download starts
     });
   } else {
-    res.status(404).json({ error: 'File not found on disk' });
+    res.status(404).json({ success: false, error: 'File not found on disk' });
   }
 });
 
