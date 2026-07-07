@@ -11,3 +11,12 @@ services:
         value: 3000
       - key: RENDER
         value: 'true'
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: video-processor-redis
+          property: connectionString
+
+  - type: redis
+    name: video-processor-redis
+    plan: free

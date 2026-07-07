@@ -11,6 +11,8 @@ import { VideoMetadata, JobStatus, Platform } from './src/types';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import helmet from 'helmet';
+import { redisConnection, videoQueue } from './queue';
+import './worker';
 
 // Ensure ffmpeg and ffprobe paths are set
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
@@ -18,6 +20,8 @@ ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 const app = express();
 const PORT = parseInt(process.env.PORT as string, 10) || 3000;
+
+app.set('trust proxy', 1);
 
 // Setup directories - use tmp on serverless/render environments
 const baseDir = process.env.VERCEL || process.env.RENDER ? os.tmpdir() : process.cwd();
@@ -45,7 +49,7 @@ const limiter = rateLimit({
 const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 20, // Limit each IP to 20 uploads per hour
-  message: { error: 'Too many uploads from this IP, please try again after an hour' }
+  message: { success: false, error: 'Too many uploads from this IP, please try again after an hour' }
 });
 
 app.use(limiter);
@@ -76,28 +80,28 @@ interface JobRecord extends JobStatus {
   createdAt: number;
 }
 
-const jobs = new Map<string, JobRecord>();
-const jobQueue: string[] = [];
-let activeJobs = 0;
-const MAX_CONCURRENT_JOBS = Math.max(1, os.cpus().length - 1); // Leave 1 core for the main thread
-
 // File Cleanup Task
 const CLEANUP_INTERVAL = 1000 * 60 * 30; // 30 minutes
 const MAX_FILE_AGE = 1000 * 60 * 60; // 1 hour
 
-setInterval(() => {
-  const now = Date.now();
-  console.log('Running scheduled file cleanup...');
-  for (const [jobId, job] of jobs.entries()) {
-    if (now - job.createdAt > MAX_FILE_AGE) {
-      if (job.inputPath && fs.existsSync(job.inputPath)) {
-        fs.unlink(job.inputPath, () => {});
+setInterval(async () => {
+  try {
+    const now = Date.now();
+    console.log('Running scheduled file cleanup...');
+    const keys = await redisConnection.keys('job:*');
+    for (const key of keys) {
+      const data = await redisConnection.get(key);
+      if (data) {
+        const job: JobRecord = JSON.parse(data);
+        if (now - job.createdAt > MAX_FILE_AGE) {
+          if (job.inputPath && fs.existsSync(job.inputPath)) fs.unlink(job.inputPath, () => {});
+          if (job.outputPath && fs.existsSync(job.outputPath)) fs.unlink(job.outputPath, () => {});
+          await redisConnection.del(key);
+        }
       }
-      if (job.outputPath && fs.existsSync(job.outputPath)) {
-        fs.unlink(job.outputPath, () => {});
-      }
-      jobs.delete(jobId);
     }
+  } catch(e) {
+    console.error('Cleanup error:', e);
   }
 }, CLEANUP_INTERVAL);
 
@@ -185,13 +189,14 @@ app.post('/api/upload', uploadLimiter, upload.single('video'), async (req, res) 
     
     const metadata = await analyzeVideo(inputPath, req.file.originalname);
     
-    jobs.set(jobId, {
+    const jobData: JobRecord = {
       status: 'idle',
       progress: 0,
       originalMetadata: metadata,
       inputPath: inputPath,
       createdAt: Date.now()
-    });
+    };
+    await redisConnection.set(`job:${jobId}`, JSON.stringify(jobData));
 
     res.json({ success: true, data: { jobId, metadata } });
   } catch (err: any) {
@@ -210,22 +215,38 @@ app.post('/api/process', async (req, res) => {
       return;
     }
 
-    const job = jobs.get(jobId);
-    if (!job || !job.inputPath) {
+    const jobDataStr = await redisConnection.get(`job:${jobId}`);
+    if (!jobDataStr) {
       res.status(404).json({ success: false, error: 'Job or file not found' });
+      return;
+    }
+
+    const job: JobRecord = JSON.parse(jobDataStr);
+    if (!job.inputPath) {
+      res.status(404).json({ success: false, error: 'Job input file missing' });
       return;
     }
 
     const outputPath = path.join(outputDir, `${jobId}_${platform}_${qualityMode}.mp4`);
 
-    jobs.set(jobId, { ...job, status: 'queued', progress: 0, platform, qualityMode, outputPath });
+    job.status = 'queued';
+    job.progress = 0;
+    job.platform = platform;
+    job.qualityMode = qualityMode;
+    job.outputPath = outputPath;
+    
+    await redisConnection.set(`job:${jobId}`, JSON.stringify(job));
 
-    // Add to queue instead of processing directly
-    jobQueue.push(jobId);
+    // Add to BullMQ queue
+    await videoQueue.add('process-video' as any, {
+      jobId,
+      inputPath: job.inputPath,
+      outputPath,
+      platform,
+      qualityMode
+    }, { jobId }); // Use jobID to prevent duplicates if needed
     
     res.json({ success: true, data: { jobId, message: 'Job added to queue' } });
-    
-    processNextJob();
 
   } catch (err: any) {
     console.error(err);
@@ -233,131 +254,45 @@ app.post('/api/process', async (req, res) => {
   }
 });
 
-const processNextJob = () => {
-  if (activeJobs >= MAX_CONCURRENT_JOBS || jobQueue.length === 0) {
-    return;
-  }
-
-  const jobId = jobQueue.shift();
-  if (!jobId) return;
-
-  const job = jobs.get(jobId);
-  if (!job || !job.inputPath || !job.outputPath || !job.platform || !job.qualityMode) {
-    processNextJob(); // Skip invalid job
-    return;
-  }
-
-  activeJobs++;
-  
-  const { inputPath, outputPath, platform, qualityMode } = job;
-  const profile = PLATFORM_PROFILES[platform];
-
-  jobs.set(jobId, { ...job, status: 'processing' });
-
-  let crf = '17';
-  let audioBitrate = '256k';
-  let preset = 'medium'; // Changed from slow for better performance/quality balance
-
-  if (qualityMode === 'balanced') {
-    crf = '23';
-    audioBitrate = '192k';
-    preset = 'fast';
-  } else if (qualityMode === 'smaller_size') {
-    crf = '28';
-    audioBitrate = '128k';
-    preset = 'veryfast';
-  }
-
-  // Start FFmpeg processing in background
-  ffmpeg(inputPath)
-    .videoCodec('libx264')
-    .audioCodec('aac')
-    .format('mp4')
-    .outputOptions([
-      '-pix_fmt yuv420p',
-      `-crf ${crf}`, // Quality
-      `-preset ${preset}`, // Compression preset optimized for speed/quality
-      '-profile:v high',
-      '-level 4.1',
-      '-movflags +faststart', // Web optimized
-      `-b:a ${audioBitrate}`
-    ])
-    // Perform Lanczos crop/scale and unsharp mask
-    .videoFilters([
-      `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=increase:flags=lanczos`,
-      `crop=${profile.width}:${profile.height}`,
-      `unsharp=3:3:0.5:3:3:0.0` // Light sharpening to recover details after scaling
-    ])
-    .on('progress', (progress) => {
-      if (jobs.has(jobId)) {
-        const currentJob = jobs.get(jobId)!;
-        const percent = progress.percent !== undefined ? Math.min(Math.max(progress.percent, 0), 100) : 0;
-        jobs.set(jobId, { ...currentJob, progress: percent });
+app.get('/api/stats', async (req, res) => {
+  try {
+    const jobCounts = await videoQueue.getJobCounts('wait', 'active', 'completed', 'failed');
+    res.json({
+      success: true,
+      data: {
+        activeJobs: jobCounts.active,
+        queuedJobs: jobCounts.wait,
+        maxConcurrentJobs: 1,
+        totalTrackedJobs: (await redisConnection.keys('job:*')).length
       }
-    })
-    .on('end', async () => {
-      if (jobs.has(jobId)) {
-         const currentJob = jobs.get(jobId)!;
-         try {
-           const processedMetadata = await analyzeVideo(outputPath, `processed_${platform}.mp4`);
-           const qualityScore = calculateQualityScore(processedMetadata, profile);
-           jobs.set(jobId, { 
-             ...currentJob, 
-             status: 'completed', 
-             resultUrl: `/api/download/${jobId}`, 
-             progress: 100,
-             processedMetadata,
-             qualityScore
-           });
-         } catch (analyzeErr) {
-           console.error(`Post-process analysis failed for ${jobId}:`, analyzeErr);
-           jobs.set(jobId, { ...currentJob, status: 'error', error: 'Failed to analyze output video' });
-         }
-      }
-      fs.unlink(inputPath, () => {});
-      activeJobs--;
-      processNextJob();
-    })
-    .on('error', (err) => {
-      console.error(`FFmpeg error for ${jobId}:`, err);
-      if (jobs.has(jobId)) {
-         const currentJob = jobs.get(jobId)!;
-         jobs.set(jobId, { ...currentJob, status: 'error', error: err.message });
-      }
-      fs.unlink(inputPath, () => {});
-      activeJobs--;
-      processNextJob();
-    })
-    .save(outputPath);
-};
-
-app.get('/api/stats', (req, res) => {
-  res.json({
-    success: true,
-    data: {
-      activeJobs,
-      queuedJobs: jobQueue.length,
-      maxConcurrentJobs: MAX_CONCURRENT_JOBS,
-      totalTrackedJobs: jobs.size
-    }
-  });
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
 });
 
-app.get('/api/status/:jobId', (req, res) => {
+app.get('/api/status/:jobId', async (req, res) => {
   const jobId = req.params.jobId;
-  if (!jobs.has(jobId)) {
+  const jobDataStr = await redisConnection.get(`job:${jobId}`);
+  if (!jobDataStr) {
     res.status(404).json({ success: false, error: 'Job not found' });
     return;
   }
   // Exclude internal paths before sending to client
-  const { inputPath, outputPath, ...publicJobData } = jobs.get(jobId)!;
+  const { inputPath, outputPath, ...publicJobData } = JSON.parse(jobDataStr);
   res.json({ success: true, data: publicJobData });
 });
 
-app.get('/api/download/:jobId', (req, res) => {
+app.get('/api/download/:jobId', async (req, res) => {
   const jobId = req.params.jobId;
-  const job = jobs.get(jobId);
-  if (!job || job.status !== 'completed' || !job.outputPath) {
+  const jobDataStr = await redisConnection.get(`job:${jobId}`);
+  if (!jobDataStr) {
+    res.status(404).json({ success: false, error: 'Job not found' });
+    return;
+  }
+  
+  const job = JSON.parse(jobDataStr);
+  if (job.status !== 'completed' || !job.outputPath) {
     res.status(404).json({ success: false, error: 'File not ready or job not found' });
     return;
   }
