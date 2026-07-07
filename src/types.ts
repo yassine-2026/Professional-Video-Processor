@@ -32,7 +32,7 @@ export interface VideoMetadata {
 }
 
 export interface JobStatus {
-  status: 'idle' | 'processing' | 'completed' | 'error';
+  status: 'idle' | 'queued' | 'processing' | 'completed' | 'error';
   progress: number;
   platform?: Platform;
   qualityMode?: QualityMode;

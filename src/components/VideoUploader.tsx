@@ -6,9 +6,10 @@ interface Props {
   file: File | null;
   onFileSelect: (file: File | null) => void;
   disabled?: boolean;
+  uploadProgress?: number;
 }
 
-export function VideoUploader({ file, onFileSelect, disabled }: Props) {
+export function VideoUploader({ file, onFileSelect, disabled, uploadProgress }: Props) {
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -58,24 +59,40 @@ export function VideoUploader({ file, onFileSelect, disabled }: Props) {
 
   if (file) {
     return (
-      <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-blue-50 text-blue-600 rounded-lg">
-            <FileVideo className="w-8 h-8" />
+      <div className="border border-gray-200 rounded-xl p-6 bg-white shadow-sm flex flex-col gap-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-blue-50 text-blue-600 rounded-lg">
+              <FileVideo className="w-8 h-8" />
+            </div>
+            <div className="overflow-hidden">
+              <p className="font-semibold text-gray-900 truncate max-w-[200px] sm:max-w-xs text-left" dir="ltr">{file.name}</p>
+              <p className="text-sm text-gray-500" dir="ltr">{formatFileSize(file.size)}</p>
+            </div>
           </div>
-          <div className="overflow-hidden">
-            <p className="font-semibold text-gray-900 truncate max-w-[200px] sm:max-w-xs text-left" dir="ltr">{file.name}</p>
-            <p className="text-sm text-gray-500" dir="ltr">{formatFileSize(file.size)}</p>
-          </div>
+          {!disabled && (
+            <button 
+              onClick={(e) => { e.stopPropagation(); onFileSelect(null); }}
+              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+              title={t('remove_video')}
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
-        {!disabled && (
-          <button 
-            onClick={(e) => { e.stopPropagation(); onFileSelect(null); }}
-            className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-            title={t('remove_video')}
-          >
-            <X className="w-5 h-5" />
-          </button>
+        {uploadProgress !== undefined && uploadProgress > 0 && uploadProgress < 100 && (
+           <div className="w-full">
+             <div className="flex justify-between text-xs font-medium text-gray-500 mb-1">
+               <span>{t('uploading')}</span>
+               <span>{Math.round(uploadProgress)}%</span>
+             </div>
+             <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden" dir="ltr">
+               <div 
+                 className="bg-blue-500 h-1.5 rounded-full transition-all duration-300" 
+                 style={{ width: `${uploadProgress}%` }}
+               ></div>
+             </div>
+           </div>
         )}
       </div>
     );

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { Loader2, CheckCircle2, AlertCircle, Download, FileVideo } from 'lucide-react';
 import { JobStatus } from '../types';
 import { useTranslation } from 'react-i18next';
@@ -7,7 +7,7 @@ interface Props {
   status: JobStatus;
 }
 
-export function ProcessingStatus({ status }: Props) {
+export const ProcessingStatus = memo(function ProcessingStatus({ status }: Props) {
   const { t } = useTranslation();
   const [isDownloading, setIsDownloading] = useState(false);
 
@@ -34,12 +34,12 @@ export function ProcessingStatus({ status }: Props) {
     }
   };
 
-  if (status.status === 'processing') {
+  if (status.status === 'processing' || status.status === 'queued') {
     return (
       <div className="bg-white border border-gray-200 rounded-xl p-8 text-center shadow-sm">
         <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
-        <h3 className="text-xl font-semibold text-gray-900 mb-2">{t('processing_title')}</h3>
-        <p className="text-gray-500 mb-6">{t('processing_desc')}</p>
+        <h3 className="text-xl font-semibold text-gray-900 mb-2">{status.status === 'queued' ? 'In Queue' : t('processing_title')}</h3>
+        <p className="text-gray-500 mb-6">{status.status === 'queued' ? 'Waiting for available resources...' : t('processing_desc')}</p>
         
         <div className="w-full bg-gray-100 rounded-full h-3 mb-2 overflow-hidden" dir="ltr">
           <div 
@@ -92,4 +92,4 @@ export function ProcessingStatus({ status }: Props) {
   }
 
   return null;
-}
+});

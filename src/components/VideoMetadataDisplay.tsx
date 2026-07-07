@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { VideoMetadata } from '../types';
 import { useTranslation } from 'react-i18next';
 
@@ -7,7 +7,7 @@ interface Props {
   title?: string;
 }
 
-export function VideoMetadataDisplay({ metadata, title }: Props) {
+export const VideoMetadataDisplay = memo(function VideoMetadataDisplay({ metadata, title }: Props) {
   const { t } = useTranslation();
   const formatSize = (bytes: number) => {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
@@ -64,4 +64,4 @@ export function VideoMetadataDisplay({ metadata, title }: Props) {
       </div>
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { QualityMode } from '../types';
 import { Sparkles, Scale, Minimize2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,7 +9,7 @@ interface Props {
   disabled?: boolean;
 }
 
-export function QualityModeSelector({ selected, onSelect, disabled }: Props) {
+export const QualityModeSelector = memo(function QualityModeSelector({ selected, onSelect, disabled }: Props) {
   const { t, i18n } = useTranslation();
   
   const modes: { id: QualityMode; name: string; icon: React.ElementType; desc: string }[] = [
@@ -64,4 +64,4 @@ export function QualityModeSelector({ selected, onSelect, disabled }: Props) {
       })}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { Platform } from '../types';
 import { Instagram, Youtube, Smartphone, Facebook, Twitter, Linkedin, MessageCircle, Send } from 'lucide-react';
 
@@ -8,7 +8,7 @@ interface Props {
   disabled?: boolean;
 }
 
-export function PlatformSelector({ selected, onSelect, disabled }: Props) {
+export const PlatformSelector = memo(function PlatformSelector({ selected, onSelect, disabled }: Props) {
   const platforms: { id: Platform; name: string; icon: React.ElementType; desc: string }[] = [
     { id: 'instagram_reels', name: 'Instagram Reels', icon: Instagram, desc: '1080x1920 (9:16)' },
     { id: 'instagram_post', name: 'Instagram Feed', icon: Instagram, desc: '1080x1080 (1:1)' },
@@ -53,4 +53,4 @@ export function PlatformSelector({ selected, onSelect, disabled }: Props) {
       })}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import { VideoMetadata, JobStatus } from '../types';
 import { ArrowLeft, Award } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,7 +9,7 @@ interface Props {
   score?: number;
 }
 
-export function ComparisonReport({ original, processed, score }: Props) {
+export const ComparisonReport = memo(function ComparisonReport({ original, processed, score }: Props) {
   const { t, i18n } = useTranslation();
   const formatSize = (bytes: number) => (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   const formatBitrate = (bitrate: number) => bitrate ? Math.round(bitrate / 1000) + ' kbps' : 'N/A';
@@ -19,7 +19,7 @@ export function ComparisonReport({ original, processed, score }: Props) {
   const ChangeRow = ({ label, oldVal, newVal, isChanged }: { label: string, oldVal: string, newVal: string, isChanged: boolean }) => {
     if (!isChanged) return null;
     return (
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between py-3 border-b border-gray-100 last:border-0">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between py-3 border-b border-gray-100 last:border-0 hover:bg-gray-50 px-2 rounded-lg transition-colors">
         <span className="text-gray-600 font-medium w-32">{label}</span>
         <div className="flex items-center gap-3 mt-2 sm:mt-0 font-mono text-sm" dir="ltr">
           <span className="text-gray-500">{oldVal}</span>
@@ -33,7 +33,7 @@ export function ComparisonReport({ original, processed, score }: Props) {
   return (
     <div className="space-y-6">
       {score !== undefined && (
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-6 flex items-center justify-between">
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-xl p-6 flex items-center justify-between shadow-sm">
           <div>
             <h3 className="font-bold text-gray-900 text-lg flex items-center gap-2">
               <Award className="w-5 h-5 text-blue-600" />
@@ -113,4 +113,4 @@ export function ComparisonReport({ original, processed, score }: Props) {
       </div>
     </div>
   );
-}
+});

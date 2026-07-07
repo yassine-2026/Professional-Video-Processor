@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
-import { Film, Play, Upload as UploadIcon, Activity, Settings2 } from 'lucide-react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
+import { Film, Play, Activity, Settings2 } from 'lucide-react';
 import { Platform, JobStatus, UploadResponse, QualityMode } from './types';
 import { VideoUploader } from './components/VideoUploader';
 import { PlatformSelector } from './components/PlatformSelector';
-import { ProcessingStatus } from './components/ProcessingStatus';
-import { VideoPreview } from './components/VideoPreview';
-import { VideoMetadataDisplay } from './components/VideoMetadataDisplay';
-import { ComparisonReport } from './components/ComparisonReport';
 import { QualityModeSelector } from './components/QualityModeSelector';
 import { LanguageSelector } from './components/LanguageSelector';
 import { useTranslation } from 'react-i18next';
+import axios from 'axios';
+
+const ProcessingStatus = lazy(() => import('./components/ProcessingStatus').then(module => ({ default: module.ProcessingStatus })));
+const VideoPreview = lazy(() => import('./components/VideoPreview').then(module => ({ default: module.VideoPreview })));
+const VideoMetadataDisplay = lazy(() => import('./components/VideoMetadataDisplay').then(module => ({ default: module.VideoMetadataDisplay })));
+const ComparisonReport = lazy(() => import('./components/ComparisonReport').then(module => ({ default: module.ComparisonReport })));
 
 export default function App() {
   const { t, i18n } = useTranslation();
@@ -19,6 +21,7 @@ export default function App() {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   useEffect(() => {
     document.documentElement.dir = i18n.dir();
@@ -28,21 +31,21 @@ export default function App() {
 
   useEffect(() => {
     let interval: number;
-    if (jobId && jobStatus?.status === 'processing') {
+    if (jobId && (jobStatus?.status === 'processing' || jobStatus?.status === 'queued')) {
       interval = window.setInterval(async () => {
         try {
-          const res = await fetch(`/api/status/${jobId}`);
-          if (res.ok) {
-            const data: JobStatus = await res.json();
+          const res = await axios.get(`/api/status/${jobId}`);
+          if (res.status === 200) {
+            const data: JobStatus = res.data;
             setJobStatus(data);
-            if (data.status !== 'processing') {
+            if (data.status !== 'processing' && data.status !== 'queued') {
               clearInterval(interval);
             }
           }
         } catch (err) {
           console.error(err);
         }
-      }, 1000);
+      }, 2000); // Polling every 2 seconds
     }
     return () => clearInterval(interval);
   }, [jobId, jobStatus?.status]);
@@ -51,6 +54,7 @@ export default function App() {
     setFile(selectedFile);
     setJobStatus(null);
     setJobId(null);
+    setUploadProgress(0);
     
     if (!selectedFile) return;
 
@@ -59,21 +63,24 @@ export default function App() {
     formData.append('video', selectedFile);
 
     try {
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
+      const res = await axios.post<UploadResponse>('/api/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            setUploadProgress(percentCompleted);
+          }
+        }
       });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || t('error_title'));
-      }
-
-      const data: UploadResponse = await res.json();
+      const data = res.data;
       setJobId(data.jobId);
       setJobStatus({ status: 'idle', progress: 0, originalMetadata: data.metadata });
     } catch (err: any) {
-      alert(t('error_title') + ': ' + err.message);
+      const errorMessage = err.response?.data?.error || err.message;
+      alert(t('error_title') + ': ' + errorMessage);
       setFile(null);
     } finally {
       setIsUploading(false);
@@ -84,31 +91,25 @@ export default function App() {
     if (!jobId) return;
 
     const currentOriginalMetadata = jobStatus?.originalMetadata;
-    setJobStatus({ status: 'processing', progress: 0, platform, qualityMode, originalMetadata: currentOriginalMetadata });
+    setJobStatus({ status: 'queued', progress: 0, platform, qualityMode, originalMetadata: currentOriginalMetadata });
     
     try {
-      const res = await fetch('/api/process', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ jobId, platform, qualityMode }),
-      });
+      const res = await axios.post('/api/process', { jobId, platform, qualityMode });
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || t('error_title'));
+      if (res.status !== 200) {
+        throw new Error(res.data?.error || t('error_title'));
       }
       
       setTimeout(() => {
         document.getElementById('status-section')?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
     } catch (err: any) {
-      setJobStatus({ status: 'error', progress: 0, platform, qualityMode, error: err.message, originalMetadata: currentOriginalMetadata });
+      const errorMessage = err.response?.data?.error || err.message;
+      setJobStatus({ status: 'error', progress: 0, platform, qualityMode, error: errorMessage, originalMetadata: currentOriginalMetadata });
     }
   };
 
-  const isProcessing = jobStatus?.status === 'processing' || isUploading;
+  const isProcessing = jobStatus?.status === 'processing' || jobStatus?.status === 'queued' || isUploading;
 
   return (
     <div className="min-h-screen pb-20 font-sans text-gray-900 bg-gray-50">
@@ -133,8 +134,8 @@ export default function App() {
             <span className="flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 text-sm">1</span>
             {t('step1_title')}
           </h2>
-          <VideoUploader file={file} onFileSelect={handleFileSelect} disabled={isProcessing} />
-          {isUploading && (
+          <VideoUploader file={file} onFileSelect={handleFileSelect} disabled={isProcessing} uploadProgress={uploadProgress} />
+          {isUploading && uploadProgress === 100 && (
             <div className="mt-4 flex items-center gap-3 text-blue-600 justify-center">
               <Activity className="w-5 h-5 animate-pulse" />
               <span className="font-medium">{t('uploading')}</span>
@@ -142,11 +143,13 @@ export default function App() {
           )}
         </section>
 
-        {jobStatus?.originalMetadata && (
-          <section className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <VideoMetadataDisplay metadata={jobStatus.originalMetadata} title={t('meta_original')} />
-          </section>
-        )}
+        <Suspense fallback={<div className="h-20 animate-pulse bg-gray-200 rounded-xl"></div>}>
+          {jobStatus?.originalMetadata && (
+            <section className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <VideoMetadataDisplay metadata={jobStatus.originalMetadata} title={t('meta_original')} />
+            </section>
+          )}
+        </Suspense>
 
         <section className={!jobStatus?.originalMetadata ? 'opacity-50 pointer-events-none transition-opacity duration-300' : 'transition-opacity duration-300'}>
           <h2 className="text-xl font-bold text-gray-900 mb-5 flex items-center gap-2">
@@ -177,31 +180,33 @@ export default function App() {
           </div>
         )}
 
-        {jobStatus && jobStatus.status !== 'idle' && (
-          <section className="scroll-mt-24" id="status-section">
-            <ProcessingStatus status={jobStatus} />
-          </section>
-        )}
+        <Suspense fallback={<div className="h-40 animate-pulse bg-gray-200 rounded-xl"></div>}>
+          {jobStatus && jobStatus.status !== 'idle' && (
+            <section className="scroll-mt-24" id="status-section">
+              <ProcessingStatus status={jobStatus} />
+            </section>
+          )}
 
-        {jobStatus?.status === 'completed' && jobStatus.processedMetadata && jobStatus.originalMetadata && (
-          <section className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-             <ComparisonReport 
-                original={jobStatus.originalMetadata} 
-                processed={jobStatus.processedMetadata} 
-                score={jobStatus.qualityScore}
-             />
-          </section>
-        )}
+          {jobStatus?.status === 'completed' && jobStatus.processedMetadata && jobStatus.originalMetadata && (
+            <section className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+               <ComparisonReport 
+                  original={jobStatus.originalMetadata} 
+                  processed={jobStatus.processedMetadata} 
+                  score={jobStatus.qualityScore}
+               />
+            </section>
+          )}
 
-        {file && (
-          <section className="pt-10 border-t border-gray-200">
-            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-              <Film className="w-6 h-6 text-blue-600" />
-              {t('preview_title')}
-            </h2>
-            <VideoPreview file={file} resultUrl={jobStatus?.resultUrl} />
-          </section>
-        )}
+          {file && (
+            <section className="pt-10 border-t border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+                <Film className="w-6 h-6 text-blue-600" />
+                {t('preview_title')}
+              </h2>
+              <VideoPreview file={file} resultUrl={jobStatus?.resultUrl} />
+            </section>
+          )}
+        </Suspense>
       </main>
     </div>
   );

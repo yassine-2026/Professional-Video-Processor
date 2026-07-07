@@ -1,27 +1,54 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import multer from 'multer';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import { createServer as createViteServer } from 'vite';
 import { VideoMetadata, JobStatus, Platform } from './src/types';
+import rateLimit from 'express-rate-limit';
+import cors from 'cors';
+import helmet from 'helmet';
 
 // Ensure ffmpeg and ffprobe paths are set
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 ffmpeg.setFfprobePath(ffprobeInstaller.path);
 
 const app = express();
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT as string, 10) || 3000;
 
-// Setup directories - use /tmp on serverless environments
-const baseDir = process.env.VERCEL ? '/tmp' : process.cwd();
+// Setup directories - use tmp on serverless/render environments
+const baseDir = process.env.VERCEL || process.env.RENDER ? os.tmpdir() : process.cwd();
 const uploadsDir = path.join(baseDir, 'uploads');
 const outputDir = path.join(baseDir, 'output');
 
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+// Security and CORS
+app.use(cors());
+app.use(helmet({
+  contentSecurityPolicy: false, // Vite uses inline scripts in dev
+  crossOriginEmbedderPolicy: false,
+}));
+
+// Rate Limiting setup
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20, // Limit each IP to 20 uploads per hour
+  message: { error: 'Too many uploads from this IP, please try again after an hour' }
+});
+
+app.use(limiter);
 
 // Multer setup
 const storage = multer.diskStorage({
@@ -42,8 +69,37 @@ const upload = multer({
   }
 });
 
-// Job store (in-memory for this simple app)
-const jobs = new Map<string, JobStatus & { inputPath?: string; outputPath?: string }>();
+// Job store and Queue System
+interface JobRecord extends JobStatus {
+  inputPath?: string;
+  outputPath?: string;
+  createdAt: number;
+}
+
+const jobs = new Map<string, JobRecord>();
+const jobQueue: string[] = [];
+let activeJobs = 0;
+const MAX_CONCURRENT_JOBS = Math.max(1, os.cpus().length - 1); // Leave 1 core for the main thread
+
+// File Cleanup Task
+const CLEANUP_INTERVAL = 1000 * 60 * 30; // 30 minutes
+const MAX_FILE_AGE = 1000 * 60 * 60; // 1 hour
+
+setInterval(() => {
+  const now = Date.now();
+  console.log('Running scheduled file cleanup...');
+  for (const [jobId, job] of jobs.entries()) {
+    if (now - job.createdAt > MAX_FILE_AGE) {
+      if (job.inputPath && fs.existsSync(job.inputPath)) {
+        fs.unlink(job.inputPath, () => {});
+      }
+      if (job.outputPath && fs.existsSync(job.outputPath)) {
+        fs.unlink(job.outputPath, () => {});
+      }
+      jobs.delete(jobId);
+    }
+  }
+}, CLEANUP_INTERVAL);
 
 app.use(express.json());
 
@@ -117,7 +173,7 @@ const calculateQualityScore = (metadata: VideoMetadata, profile: any) => {
   return score;
 };
 
-app.post('/api/upload', upload.single('video'), async (req, res) => {
+app.post('/api/upload', uploadLimiter, upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
       res.status(400).json({ error: 'No video file provided' });
@@ -133,7 +189,8 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
       status: 'idle',
       progress: 0,
       originalMetadata: metadata,
-      inputPath: inputPath
+      inputPath: inputPath,
+      createdAt: Date.now()
     });
 
     res.json({ jobId, metadata });
@@ -159,91 +216,128 @@ app.post('/api/process', async (req, res) => {
       return;
     }
 
-    const profile = PLATFORM_PROFILES[platform];
-    const inputPath = job.inputPath;
     const outputPath = path.join(outputDir, `${jobId}_${platform}_${qualityMode}.mp4`);
 
-    jobs.set(jobId, { ...job, status: 'processing', progress: 0, platform, qualityMode, outputPath });
+    jobs.set(jobId, { ...job, status: 'queued', progress: 0, platform, qualityMode, outputPath });
 
-    res.json({ jobId });
-
-    let crf = '17';
-    let audioBitrate = '256k';
-    let preset = 'slow';
-
-    if (qualityMode === 'balanced') {
-      crf = '23';
-      audioBitrate = '192k';
-      preset = 'medium';
-    } else if (qualityMode === 'smaller_size') {
-      crf = '28';
-      audioBitrate = '128k';
-      preset = 'fast';
-    }
-
-    // Start FFmpeg processing in background
-    ffmpeg(inputPath)
-      .videoCodec('libx264')
-      .audioCodec('aac')
-      .format('mp4')
-      .outputOptions([
-        '-pix_fmt yuv420p',
-        `-crf ${crf}`, // High quality (17-18 is visually lossless)
-        `-preset ${preset}`, // Compression preset
-        '-profile:v high', // High profile for maximum quality on social media
-        '-level 4.1', // Better device compatibility
-        '-movflags +faststart', // Web optimized
-        `-b:a ${audioBitrate}` // Audio bitrate
-      ])
-      // Perform Lanczos crop/scale and unsharp mask
-      .videoFilters([
-        `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=increase:flags=lanczos`,
-        `crop=${profile.width}:${profile.height}`,
-        `unsharp=3:3:0.5:3:3:0.0` // Light sharpening to recover details after scaling
-      ])
-      .on('progress', (progress) => {
-        if (jobs.has(jobId)) {
-          const currentJob = jobs.get(jobId)!;
-          const percent = progress.percent !== undefined ? Math.min(Math.max(progress.percent, 0), 100) : 0;
-          jobs.set(jobId, { ...currentJob, progress: percent });
-        }
-      })
-      .on('end', async () => {
-        if (jobs.has(jobId)) {
-           const currentJob = jobs.get(jobId)!;
-           try {
-             const processedMetadata = await analyzeVideo(outputPath, `processed_${platform}.mp4`);
-             const qualityScore = calculateQualityScore(processedMetadata, profile);
-             jobs.set(jobId, { 
-               ...currentJob, 
-               status: 'completed', 
-               resultUrl: `/api/download/${jobId}`, 
-               progress: 100,
-               processedMetadata,
-               qualityScore
-             });
-           } catch (analyzeErr) {
-             console.error(`Post-process analysis failed for ${jobId}:`, analyzeErr);
-             jobs.set(jobId, { ...currentJob, status: 'error', error: 'Failed to analyze output video' });
-           }
-        }
-        // Cleanup input file after processing
-        fs.unlink(inputPath, () => {});
-      })
-      .on('error', (err) => {
-        console.error(`FFmpeg error for ${jobId}:`, err);
-        if (jobs.has(jobId)) {
-           const currentJob = jobs.get(jobId)!;
-           jobs.set(jobId, { ...currentJob, status: 'error', error: err.message });
-        }
-        fs.unlink(inputPath, () => {});
-      })
-      .save(outputPath);
+    // Add to queue instead of processing directly
+    jobQueue.push(jobId);
+    
+    res.json({ jobId, message: 'Job added to queue' });
+    
+    processNextJob();
 
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: 'Internal server error: ' + err.message });
   }
+});
+
+const processNextJob = () => {
+  if (activeJobs >= MAX_CONCURRENT_JOBS || jobQueue.length === 0) {
+    return;
+  }
+
+  const jobId = jobQueue.shift();
+  if (!jobId) return;
+
+  const job = jobs.get(jobId);
+  if (!job || !job.inputPath || !job.outputPath || !job.platform || !job.qualityMode) {
+    processNextJob(); // Skip invalid job
+    return;
+  }
+
+  activeJobs++;
+  
+  const { inputPath, outputPath, platform, qualityMode } = job;
+  const profile = PLATFORM_PROFILES[platform];
+
+  jobs.set(jobId, { ...job, status: 'processing' });
+
+  let crf = '17';
+  let audioBitrate = '256k';
+  let preset = 'medium'; // Changed from slow for better performance/quality balance
+
+  if (qualityMode === 'balanced') {
+    crf = '23';
+    audioBitrate = '192k';
+    preset = 'fast';
+  } else if (qualityMode === 'smaller_size') {
+    crf = '28';
+    audioBitrate = '128k';
+    preset = 'veryfast';
+  }
+
+  // Start FFmpeg processing in background
+  ffmpeg(inputPath)
+    .videoCodec('libx264')
+    .audioCodec('aac')
+    .format('mp4')
+    .outputOptions([
+      '-pix_fmt yuv420p',
+      `-crf ${crf}`, // Quality
+      `-preset ${preset}`, // Compression preset optimized for speed/quality
+      '-profile:v high',
+      '-level 4.1',
+      '-movflags +faststart', // Web optimized
+      `-b:a ${audioBitrate}`
+    ])
+    // Perform Lanczos crop/scale and unsharp mask
+    .videoFilters([
+      `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=increase:flags=lanczos`,
+      `crop=${profile.width}:${profile.height}`,
+      `unsharp=3:3:0.5:3:3:0.0` // Light sharpening to recover details after scaling
+    ])
+    .on('progress', (progress) => {
+      if (jobs.has(jobId)) {
+        const currentJob = jobs.get(jobId)!;
+        const percent = progress.percent !== undefined ? Math.min(Math.max(progress.percent, 0), 100) : 0;
+        jobs.set(jobId, { ...currentJob, progress: percent });
+      }
+    })
+    .on('end', async () => {
+      if (jobs.has(jobId)) {
+         const currentJob = jobs.get(jobId)!;
+         try {
+           const processedMetadata = await analyzeVideo(outputPath, `processed_${platform}.mp4`);
+           const qualityScore = calculateQualityScore(processedMetadata, profile);
+           jobs.set(jobId, { 
+             ...currentJob, 
+             status: 'completed', 
+             resultUrl: `/api/download/${jobId}`, 
+             progress: 100,
+             processedMetadata,
+             qualityScore
+           });
+         } catch (analyzeErr) {
+           console.error(`Post-process analysis failed for ${jobId}:`, analyzeErr);
+           jobs.set(jobId, { ...currentJob, status: 'error', error: 'Failed to analyze output video' });
+         }
+      }
+      fs.unlink(inputPath, () => {});
+      activeJobs--;
+      processNextJob();
+    })
+    .on('error', (err) => {
+      console.error(`FFmpeg error for ${jobId}:`, err);
+      if (jobs.has(jobId)) {
+         const currentJob = jobs.get(jobId)!;
+         jobs.set(jobId, { ...currentJob, status: 'error', error: err.message });
+      }
+      fs.unlink(inputPath, () => {});
+      activeJobs--;
+      processNextJob();
+    })
+    .save(outputPath);
+};
+
+app.get('/api/stats', (req, res) => {
+  res.json({
+    activeJobs,
+    queuedJobs: jobQueue.length,
+    maxConcurrentJobs: MAX_CONCURRENT_JOBS,
+    totalTrackedJobs: jobs.size
+  });
 });
 
 app.get('/api/status/:jobId', (req, res) => {
@@ -281,6 +375,17 @@ app.get('/api/download/:jobId', (req, res) => {
   } else {
     res.status(404).json({ error: 'File not found on disk' });
   }
+});
+
+// API 404 Handler - MUST be before SPA fallback
+app.use('/api', (req, res) => {
+  res.status(404).json({ success: false, error: 'API endpoint not found' });
+});
+
+// Global Error Handler for API
+app.use('/api', (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('API Error:', err);
+  res.status(500).json({ success: false, error: err.message || 'Internal server error' });
 });
 
 async function startServer() {

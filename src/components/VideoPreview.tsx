@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface Props {
@@ -6,7 +6,7 @@ interface Props {
   resultUrl?: string;
 }
 
-export function VideoPreview({ file, resultUrl }: Props) {
+export const VideoPreview = memo(function VideoPreview({ file, resultUrl }: Props) {
   const { t } = useTranslation();
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
 
@@ -59,4 +59,4 @@ export function VideoPreview({ file, resultUrl }: Props) {
       </div>
     </div>
   );
-}
+});
