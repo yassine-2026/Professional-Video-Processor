@@ -1,0 +1,6 @@
+{
+  "name": "Video Processor",
+  "description": "أداة احترافية لتجهيز الفيديوهات لمنصات التواصل الاجتماعي باستخدام FFmpeg.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
